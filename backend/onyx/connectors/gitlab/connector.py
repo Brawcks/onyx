@@ -129,7 +129,7 @@ def _convert_code_to_document(
         id=file["id"],
         sections=sections,
         source=DocumentSource.GITLAB,
-        semantic_identifier=file["name"],
+        semantic_identifier=file["path"],
         doc_updated_at=datetime.now().replace(tzinfo=timezone.utc),
         primary_owners=[],
         metadata=metadata,
