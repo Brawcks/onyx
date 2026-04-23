@@ -77,6 +77,9 @@ from onyx.llm.utils import MAX_CONTEXT_TOKENS
 from onyx.natural_language_processing.utils import BaseTokenizer
 from onyx.natural_language_processing.utils import get_tokenizer
 from onyx.natural_language_processing.utils import tokenizer_trim_middle
+from onyx.prompts.contextual_retrieval import CODE_CONTEXTUAL_RAG_PROMPT1
+from onyx.prompts.contextual_retrieval import CODE_CONTEXTUAL_RAG_PROMPT2
+from onyx.prompts.contextual_retrieval import CODE_DOCUMENT_SUMMARY_PROMPT
 from onyx.prompts.contextual_retrieval import CONTEXTUAL_RAG_PROMPT1
 from onyx.prompts.contextual_retrieval import CONTEXTUAL_RAG_PROMPT2
 from onyx.prompts.contextual_retrieval import DOCUMENT_SUMMARY_PROMPT
@@ -726,7 +729,15 @@ def add_document_summaries(
     # Apply prompt caching: cache the static prompt, document content is the suffix
     # Note: For document summarization, there's no cacheable prefix since the document changes
     # So we just pass the full prompt without caching
-    summary_prompt = DOCUMENT_SUMMARY_PROMPT.format(document=doc_content)
+    source_doc = chunks_by_doc[0].source_document
+    if source_doc.metadata.get("type") == "CodeFile":
+        language = str(source_doc.metadata.get("language") or "code")
+        file_path = source_doc.semantic_identifier or "unknown"
+        summary_prompt = CODE_DOCUMENT_SUMMARY_PROMPT.format(
+            document=doc_content, language=language, file_path=file_path
+        )
+    else:
+        summary_prompt = DOCUMENT_SUMMARY_PROMPT.format(document=doc_content)
     prompt_msg = UserMessage(content=summary_prompt)
 
     response = llm.invoke(prompt_msg, max_tokens=MAX_CONTEXT_TOKENS)
@@ -766,21 +777,42 @@ def add_chunk_summaries(
         if len(doc_tokens) <= MAX_TOKENS_FOR_FULL_INCLUSION
         else chunks_by_doc[0].doc_summary
     )
+
+    source_doc = chunks_by_doc[0].source_document
+    is_code_file = source_doc.metadata.get("type") == "CodeFile"
+    language = ""
+    file_path = ""
+    if is_code_file:
+        language = str(source_doc.metadata.get("language") or "code")
+        file_path = source_doc.semantic_identifier or "unknown"
+
     if not doc_info:
         # This happens if the document is too long AND document summaries are turned off
         # In this case we compute a doc summary using the LLM
-        fallback_prompt = UserMessage(
-            content=DOCUMENT_SUMMARY_PROMPT.format(document=doc_content)
-        )
+        if is_code_file:
+            fallback_content = CODE_DOCUMENT_SUMMARY_PROMPT.format(
+                document=doc_content, language=language, file_path=file_path
+            )
+        else:
+            fallback_content = DOCUMENT_SUMMARY_PROMPT.format(document=doc_content)
+        fallback_prompt = UserMessage(content=fallback_content)
         response = llm.invoke(fallback_prompt, max_tokens=MAX_CONTEXT_TOKENS)
         doc_info = llm_response_to_string(response)
 
     from onyx.llm.prompt_cache.processor import process_with_prompt_cache
 
-    context_prompt1 = CONTEXTUAL_RAG_PROMPT1.format(document=doc_info)
+    if is_code_file:
+        context_prompt1 = CODE_CONTEXTUAL_RAG_PROMPT1.format(
+            document=doc_info, language=language, file_path=file_path
+        )
+    else:
+        context_prompt1 = CONTEXTUAL_RAG_PROMPT1.format(document=doc_info)
 
     def assign_context(chunk: DocAwareChunk) -> None:
-        context_prompt2 = CONTEXTUAL_RAG_PROMPT2.format(chunk=chunk.content)
+        if is_code_file:
+            context_prompt2 = CODE_CONTEXTUAL_RAG_PROMPT2.format(chunk=chunk.content)
+        else:
+            context_prompt2 = CONTEXTUAL_RAG_PROMPT2.format(chunk=chunk.content)
         try:
             # Apply prompt caching: cache the document context (prompt1), chunk content is the suffix
             # For string inputs with continuation=True, the result will be a concatenated string

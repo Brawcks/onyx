@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import TypeVar
 
@@ -24,6 +25,9 @@ from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
 from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
+from onyx.connectors.utils.code_utils import TEXT_INDEXABLE_EXTENSIONS
+from onyx.connectors.utils.code_utils import get_language_for_file
+from onyx.connectors.utils.code_utils import split_file_into_code_sections
 from onyx.utils.logger import setup_logger
 
 T = TypeVar("T")
@@ -90,35 +94,46 @@ def _convert_issue_to_document(issue: Any) -> Document:
 def _convert_code_to_document(
     project: Project, file: Any, url: str, projectName: str, projectOwner: str
 ) -> Document:
-    # Dynamically get the default branch from the project object
     default_branch = project.default_branch
 
-    # Fetch the file content using the correct branch
     file_content_obj = project.files.get(
         file_path=file["path"],
-        ref=default_branch,  # Use the default branch
+        ref=default_branch,
     )
     try:
         file_content = file_content_obj.decode().decode("utf-8")
     except UnicodeDecodeError:
         file_content = file_content_obj.decode().decode("latin-1")
 
-    # Construct the file URL dynamically using the default branch
     file_url = (
         f"{url}/{projectOwner}/{projectName}/-/blob/{default_branch}/{file['path']}"
     )
 
-    # Create and return a Document object
-    doc = Document(
+    # Split the file into logical sections (functions, classes, etc.) so that
+    # each embedded chunk corresponds to a semantically coherent code unit.
+    code_sections = split_file_into_code_sections(file_content, file["path"])
+    sections: list[TextSection] = [
+        TextSection(
+            link=f"{file_url}#L{cs.start_line}",
+            text=cs.content,
+        )
+        for cs in code_sections
+    ]
+
+    metadata: dict[str, str | list[str]] = {"type": "CodeFile"}
+    language = get_language_for_file(file["path"])
+    if language is not None:
+        metadata["language"] = language
+
+    return Document(
         id=file["id"],
-        sections=[TextSection(link=file_url, text=file_content)],
+        sections=sections,
         source=DocumentSource.GITLAB,
-        semantic_identifier=file["name"],
+        semantic_identifier=file["path"],
         doc_updated_at=datetime.now().replace(tzinfo=timezone.utc),
-        primary_owners=[],  # Add owners if needed
-        metadata={"type": "CodeFile"},
+        primary_owners=[],
+        metadata=metadata,
     )
-    return doc
 
 
 def _should_exclude(path: str) -> bool:
@@ -175,6 +190,11 @@ class GitlabConnector(LoadConnector, PollConnector):
                             continue
 
                         if file["type"] == "blob":
+                            if (
+                                Path(file["path"]).suffix.lower()
+                                not in TEXT_INDEXABLE_EXTENSIONS
+                            ):
+                                continue
                             code_doc_batch.append(
                                 _convert_code_to_document(
                                     project,
